@@ -1,0 +1,13 @@
+# Pre-warms kata-fc microVMs so run_python isn't blocked on a cold kata node
+# boot (nested-virt node provision + microVM boot = minutes). replicas is the
+# concurrency floor; raise it (or add an HPA targeting this WarmPool) for more
+# simultaneous executions. In a per-participant cluster, 2 is plenty.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: kata-fc-python-pool
+  namespace: agent-sandbox
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: kata-fc-python

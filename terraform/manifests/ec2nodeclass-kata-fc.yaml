@@ -1,0 +1,125 @@
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: kata-fc
+spec:
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: __NODE_IAM_ROLE__
+  cpuOptions:
+    nestedVirtualization: enabled
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: __DISCOVERY_TAG__
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: __DISCOVERY_TAG__
+  tags:
+    karpenter.sh/discovery: __DISCOVERY_TAG__
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 100Gi
+        volumeType: gp3
+        encrypted: true
+        deleteOnTermination: true
+  metadataOptions:
+    httpEndpoint: enabled
+    httpTokens: required
+    httpPutResponseHopLimit: 1
+  userData: |
+    MIME-Version: 1.0
+    Content-Type: multipart/mixed; boundary="//"
+
+    --//
+    Content-Type: text/x-shellscript; charset="us-ascii"
+
+    #!/bin/bash
+    # Installs kata-containers + Firecracker and registers a "kata-fc" containerd
+    # runtime handler on an AL2023 EKS node. Runs via cloud-init BEFORE kubelet
+    # starts (nodeadm init is ordered after cloud-init final on AL2023).
+    set -euxo pipefail
+    # Log synchronously to a file (no process-substitution tee: that races on exit
+    # and truncates the final error lines we most need when a boot fails).
+    exec >/var/log/kata-fc-install.log 2>&1
+
+    KATA_VERSION="3.31.0"
+    KATA_TARBALL="kata-static-${KATA_VERSION}-amd64.tar.zst"
+    KATA_URL="https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/${KATA_TARBALL}"
+
+    echo "[kata-fc] verifying /dev/kvm is present (nested virtualization)"
+    if [ ! -e /dev/kvm ]; then
+      echo "[kata-fc] FATAL: /dev/kvm missing — nested virtualization not enabled on this instance"
+      exit 1
+    fi
+
+    echo "[kata-fc] installing prerequisites (devmapper tooling + zstd for kata tarball)"
+    dnf install -y lvm2 device-mapper-persistent-data zstd
+
+    echo "[kata-fc] downloading kata ${KATA_VERSION}"
+    curl -fsSL -o "/tmp/${KATA_TARBALL}" "${KATA_URL}"
+    # Static release is zstd-compressed and extracts into ./opt/kata — unpack at /
+    # so it lands in /opt/kata.
+    tar --use-compress-program=unzstd -xf "/tmp/${KATA_TARBALL}" -C /
+    test -x /opt/kata/bin/containerd-shim-kata-v2
+    test -x /opt/kata/bin/firecracker || test -x /opt/kata/bin/cloud-hypervisor
+
+    echo "[kata-fc] selecting firecracker kata config"
+    # kata ships a firecracker config; point the default config at it
+    install -d /etc/kata-containers
+    cp /opt/kata/share/defaults/kata-containers/configuration-fc.toml \
+       /etc/kata-containers/configuration-fc.toml
+
+    echo "[kata-fc] configuring devmapper snapshotter (Firecracker needs block, not overlayfs)"
+    # Minimal loop-backed thin pool for testing. Sizing is intentionally small;
+    # revisit for production (see plan notes).
+    DATA_DIR=/var/lib/containerd/devmapper
+    mkdir -p "${DATA_DIR}"
+    DATA_FILE="${DATA_DIR}/data"
+    META_FILE="${DATA_DIR}/meta"
+    if [ ! -f "${DATA_FILE}" ]; then
+      touch "${DATA_FILE}" && truncate -s 100G "${DATA_FILE}"
+      touch "${META_FILE}" && truncate -s 10G "${META_FILE}"
+      DATA_DEV=$(losetup --find --show "${DATA_FILE}")
+      META_DEV=$(losetup --find --show "${META_FILE}")
+      SECTOR_SIZE=512
+      DATA_SIZE_BYTES=$(blockdev --getsize64 -q "${DATA_DEV}")
+      LENGTH_SECTORS=$(( DATA_SIZE_BYTES / SECTOR_SIZE ))
+      DATA_BLOCK_SIZE=128
+      LOW_WATER_MARK=32768
+      dmsetup create devpool \
+        --table "0 ${LENGTH_SECTORS} thin-pool ${META_DEV} ${DATA_DEV} ${DATA_BLOCK_SIZE} ${LOW_WATER_MARK}"
+    fi
+
+    echo "[kata-fc] linking kata-fc shim where containerd will find it on PATH"
+    # Target /usr/bin (universally on containerd's systemd PATH on AL2023);
+    # /usr/local/bin is not guaranteed to be on the daemon PATH.
+    ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/bin/containerd-shim-kata-fc-v2
+
+    echo "[kata-fc] install complete"
+
+    --//
+    Content-Type: application/node.eks.aws
+
+    apiVersion: node.eks.aws/v1alpha1
+    kind: NodeConfig
+    spec:
+      containerd:
+        config: |
+          [plugins."io.containerd.grpc.v1.cri".containerd]
+            # EKS default discards layer blobs after the first (overlayfs) unpack;
+            # keep them so the kata-fc runtime can re-unpack the same image into
+            # the devmapper (block) snapshotter that Firecracker requires.
+            discard_unpacked_layers = false
+          [plugins."io.containerd.snapshotter.v1.devmapper"]
+            pool_name = "devpool"
+            root_path = "/var/lib/containerd/devmapper"
+            base_image_size = "10GB"
+            discard_blocks = true
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-fc]
+            runtime_type = "io.containerd.kata-fc.v2"
+            snapshotter = "devmapper"
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-fc.options]
+            ConfigPath = "/etc/kata-containers/configuration-fc.toml"
+
+    --//--

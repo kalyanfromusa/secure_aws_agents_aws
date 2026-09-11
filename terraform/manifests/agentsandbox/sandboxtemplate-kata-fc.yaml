@@ -1,0 +1,60 @@
+# SandboxTemplate for the code-execution runtime.
+#
+# runtimeClassName: kata-fc makes EVERY vended sandbox a Firecracker microVM on
+# the existing nested-virt Karpenter pool (see terraform/manifests/*-kata-fc*).
+# networkPolicyManagement: Managed + egress:[] = the upstream "air-gapped"
+# posture: the sandbox has NO egress. A custom networkPolicy REPLACES the vetted
+# defaults, so we MUST restate the router ingress rule here (see Decision 6/6a).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: kata-fc-python
+  namespace: agent-sandbox
+spec:
+  networkPolicyManagement: Managed
+  networkPolicy:
+    ingress:
+      # Re-state the secure-default router ingress (a custom policy replaces the
+      # defaults, so this must be explicit).
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: agent-sandbox-system
+            podSelector:
+              matchLabels:
+                app: sandbox-router
+    egress: []   # air-gapped: no outbound anywhere
+  service: true  # headless Service <sandbox-id>.agent-sandbox.svc for the router/SDK
+  podTemplate:
+    metadata:
+      labels:
+        # Same pattern as the coding template: a NON-reserved key that propagates
+        # to the pod and survives the claim relabel, so `kubectl -l
+        # sandbox-kind=python` selects this lab's sandboxes without mixing in the
+        # coding-agent pool (sandbox-kind=coding). Used by the "Agents using a
+        # sandbox" lab's verify-isolation commands.
+        sandbox-kind: python
+    spec:
+      runtimeClassName: kata-fc
+      automountServiceAccountToken: false   # microVM holds NO K8s creds
+      containers:
+        - name: python-runtime
+          image: __ECR__/python-runtime-sandbox:v0.5.3
+          ports:
+            - containerPort: 8888
+          readinessProbe:
+            httpGet:
+              path: "/"
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 1
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+              ephemeral-storage: "1Gi"
+      restartPolicy: "OnFailure"

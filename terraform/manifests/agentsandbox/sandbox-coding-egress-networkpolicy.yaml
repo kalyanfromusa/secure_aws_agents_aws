@@ -1,0 +1,68 @@
+# Coding-sandbox egress lock (module 1000). The microVM may reach ONLY:
+#   - cluster DNS (kube-system:53)
+#   - the Envoy AI Gateway data plane (envoy-gateway-system) — the model path
+#   - Gitea (gitea) — clone/push/PR
+# No internet, no direct Bedrock. Requires the vpc-cni network-policy agent
+# (enabled by module 900's base.tf change) to be enforced.
+#
+# SELECTOR: `sandbox-kind: coding` is set by the SandboxTemplate's podTemplate
+# and (unlike agents.x-k8s.io/warm-pool-sandbox) survives the claim relabel, so
+# this policy applies to coding pods in BOTH the warm and claimed states. Do NOT
+# use warm-pool-sandbox here: that label is dropped on claim (egress would fall
+# open on the running sandbox) and its bare form also selects the air-gapped
+# python pods.
+#
+# NOTE on the union with module 900's air-gap: coding pods are ALSO warm-pool
+# pods, so while WARM they are additionally selected by kata-fc-python-airgap
+# (egress:[] on the bare warm-pool-sandbox label). NetworkPolicy egress is
+# additive, so a warm coding pod ends up allowed exactly the destinations below.
+# Once claimed it loses warm-pool-sandbox (air-gap no longer applies) but keeps
+# sandbox-kind, so THIS policy alone keeps it locked to the same allowlist.
+#
+# NOTE on ipBlock: the AI gateway and cluster DNS are reached by their SERVICE
+# ClusterIP (172.20.x). The AWS VPC CNI resolves a namespaceSelector to the
+# destination POD IPs, so ClusterIP-destined traffic (pre-DNAT VIP) never matches
+# a namespaceSelector rule and is dropped. The service-CIDR ipBlock (172.20.0.0/16)
+# permits the ClusterIP path; the namespaceSelectors still cover pod-IP paths
+# (e.g. gitea's headless service resolves straight to a pod IP).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kata-fc-coding-egress
+  namespace: agent-sandbox
+spec:
+  podSelector:
+    matchLabels:
+      sandbox-kind: coding
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - ipBlock:
+            cidr: 172.20.0.0/16
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: envoy-gateway-system
+        - ipBlock:
+            cidr: 172.20.0.0/16
+      ports:
+        - protocol: TCP
+          port: 80
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gitea
+        - ipBlock:
+            cidr: 172.20.0.0/16
+      ports:
+        - protocol: TCP
+          port: 3000

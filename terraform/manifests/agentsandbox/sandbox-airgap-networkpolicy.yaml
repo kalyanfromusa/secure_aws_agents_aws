@@ -1,0 +1,40 @@
+# Supplemental air-gap NetworkPolicy for the kata-fc sandboxes.
+#
+# WHY THIS EXISTS: agent-sandbox v0.5.0's controller generates a
+# "<template>-network-policy" whose podSelector targets the label
+# `agents.x-k8s.io/sandbox-template-ref-hash`. But warm-pool-ADOPTED sandbox pods
+# are actually stamped with `agents.x-k8s.io/warm-pool-sandbox` (+ sandbox-name-hash)
+# and do NOT carry the template-ref-hash label — so the generated policy matches
+# ZERO pods and the intended `egress: []` air-gap is never enforced. (Verified
+# live: without this, a vended microVM could reach the internet AND the node
+# metadata endpoint.) vpc-cni's eBPF enforcement DOES reach kata microVMs (also
+# verified), so a correctly-labeled policy works.
+#
+# This policy selects the label warm-pool pods actually carry (by key, so it is
+# independent of the per-pool hash value) and enforces the air-gap: no egress at
+# all, ingress only from the sandbox-router. Requires the vpc-cni network-policy
+# agent (enabled in base.tf).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kata-fc-python-airgap
+  namespace: agent-sandbox
+spec:
+  podSelector:
+    matchExpressions:
+      - key: agents.x-k8s.io/warm-pool-sandbox
+        operator: Exists
+  policyTypes:
+    - Ingress
+    - Egress
+  egress: [] # air-gapped: no outbound anywhere
+  ingress:
+    # The broker reaches the sandbox only THROUGH the router, so allow ingress
+    # solely from the sandbox-router pods in agent-sandbox-system.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agent-sandbox-system
+          podSelector:
+            matchLabels:
+              app: sandbox-router

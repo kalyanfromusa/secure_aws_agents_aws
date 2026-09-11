@@ -1,0 +1,52 @@
+# Coding sandbox template (module 1000). Firecracker microVM (kata-fc), NO SA
+# token. Unlike the air-gapped python template, the coding sandbox needs egress
+# to the model gateway + Gitea — enforced narrowly by the egress NetworkPolicy
+# in sandbox-coding-egress-networkpolicy.yaml (this template keeps the
+# controller-managed ingress default: only from app: sandbox-router).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: kata-fc-coding
+  namespace: agent-sandbox
+spec:
+  networkPolicyManagement: Managed
+  service: true
+  podTemplate:
+    metadata:
+      labels:
+        # NON-reserved key on purpose: the controller STRIPS user labels under its
+        # own `agents.x-k8s.io/` prefix, so a reserved key never reaches the pod.
+        # `sandbox-kind` propagates to the pod AND survives the claim relabel (the
+        # controller only rewrites its own agents.x-k8s.io/* labels when a warm pod
+        # is claimed), so the egress NetworkPolicy can select coding pods in BOTH
+        # the warm and claimed states. Verified empirically.
+        sandbox-kind: coding
+    spec:
+      runtimeClassName: kata-fc
+      # Inherit CLUSTER DNS. Without this the controller's pod default is
+      # dnsPolicy: None + dnsConfig.nameservers [8.8.8.8, 1.1.1.1], so the microVM
+      # gets PUBLIC resolvers and cannot resolve *.svc.cluster.local (gitea, the AI
+      # gateway) — git clone fails with "Could not resolve host".
+      dnsPolicy: ClusterFirst
+      automountServiceAccountToken: false
+      containers:
+        - name: coding-runtime
+          image: __ECR__/coding-runtime-sandbox:v2
+          ports:
+            - containerPort: 8888
+          readinessProbe:
+            httpGet:
+              path: "/"
+              port: 8888
+            initialDelaySeconds: 0
+            periodSeconds: 1
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+              ephemeral-storage: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "3Gi"
+              ephemeral-storage: "4Gi"
+      restartPolicy: "OnFailure"

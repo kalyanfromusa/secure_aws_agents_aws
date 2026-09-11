@@ -1,0 +1,11 @@
+# Pre-warm coding microVMs so an issue trigger isn't blocked on a cold kata node
+# boot. 1 is enough for a per-participant cluster; raise for concurrency.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: kata-fc-coding-pool
+  namespace: agent-sandbox
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: kata-fc-coding

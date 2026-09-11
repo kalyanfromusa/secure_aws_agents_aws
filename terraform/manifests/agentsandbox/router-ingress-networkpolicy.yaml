@@ -1,0 +1,36 @@
+# The v0.5.0 SDK cannot send the router's ROUTER_AUTH_TOKEN (no auth field on any
+# connection config), so the router runs app-layer-unauthenticated. We enforce
+# access at the network layer instead: only two workloads (ns default) may
+# reach the router on :8080 — the module-900 code-executor broker AND the
+# module-1000 coding-agent dispatcher. Requires the vpc-cni network-policy agent
+# (enabled in base.tf) to be enforced.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-router-ingress
+  namespace: agent-sandbox-system
+spec:
+  podSelector:
+    matchLabels:
+      app: sandbox-router
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # module 900: code-execution broker
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchLabels:
+              app: code-executor
+        # module 1000: autonomous coding-agent dispatcher
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchLabels:
+              app: coding-agent
+      ports:
+        - protocol: TCP
+          port: 8080
