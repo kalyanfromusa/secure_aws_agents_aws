@@ -1,0 +1,24 @@
+# Authorize run_python for the sales-analyst persona only. JWT authentication is
+# enforced gateway-wide by module 700 (mcp-authn on the agentgateway Gateway);
+# this policy targets the code-exec backend and checks the cognito:groups claim.
+#
+# FLAG — VERIFY LIVE (same as module 700): confirm agentgateway CEL exposes the
+# colon-named claim via jwt["cognito:groups"] as a list. Fallbacks: a Cognito
+# pre-token-gen custom claim, or a coarser split.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: code-mcp-tool-authz
+  namespace: default
+spec:
+  targetRefs:
+    - kind: AgentgatewayBackend
+      name: code-mcp-backend
+      group: agentgateway.dev
+  backend:
+    mcp:
+      authorization:
+        action: Allow
+        policy:
+          matchExpressions:
+            - 'mcp.tool.name == "run_python" && "sales-analyst" in jwt["cognito:groups"]'

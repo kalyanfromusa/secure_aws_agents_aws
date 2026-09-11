@@ -1,0 +1,115 @@
+# code-executor MCP broker: vends kata-fc microVMs to run untrusted code.
+# SA "code-executor" (ns default) has an EKS Pod Identity for read-only DynamoDB
+# Query (terraform/dynamodb.tf). The broker also creates SandboxClaims via the
+# K8s API, so it needs the Role/RoleBinding below (in ns agent-sandbox, where
+# the claims + sandboxes live). NetworkPolicy in agent-sandbox-system restricts
+# the router to these pods (label app: code-executor).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-executor-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: code-executor
+  template:
+    metadata:
+      labels:
+        app: code-executor
+    spec:
+      serviceAccountName: code-executor
+      containers:
+        - name: code-executor-mcp
+          image: ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/code-executor-mcp:v1
+          imagePullPolicy: Always
+          # ORDERS_TABLE + AWS_REGION come from agent-config (same ConfigMap the
+          # 500 mcp-server uses). SANDBOX_* have defaults in sandbox_runner.py.
+          envFrom:
+            - configMapRef:
+                name: agent-config
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "256m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: code-executor-mcp
+spec:
+  selector:
+    app: code-executor
+  ports:
+    - port: 8080
+      targetPort: 8080
+      # agentgateway speaks MCP to this Service (same as the 500 mcp-server).
+      appProtocol: agentgateway.dev/mcp
+---
+# Broker RBAC: create/delete claims + watch sandboxes, in the sandbox namespace.
+# The SA lives in ns default; a RoleBinding IN ns agent-sandbox grants it these
+# verbs THERE (permissions apply in the binding's namespace).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: code-executor-sandbox
+  namespace: agent-sandbox
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: code-executor-sandbox
+  namespace: agent-sandbox
+subjects:
+  - kind: ServiceAccount
+    name: code-executor
+    namespace: default
+roleRef:
+  kind: Role
+  name: code-executor-sandbox
+  apiGroup: rbac.authorization.k8s.io
+---
+# Expose the broker's MCP through the cluster-internal agentgateway at /code-mcp.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: code-mcp-backend
+spec:
+  mcp:
+    targets:
+      - name: code-executor-mcp
+        static:
+          backendRef:
+            name: code-executor-mcp
+          port: 8080
+          protocol: StreamableHTTP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: code-mcp
+spec:
+  parentRefs:
+    - name: agentgateway
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /code-mcp
+      backendRefs:
+        - name: code-mcp-backend
+          group: agentgateway.dev
+          kind: AgentgatewayBackend

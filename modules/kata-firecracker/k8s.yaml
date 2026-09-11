@@ -1,0 +1,46 @@
+# Sample workload for the kata-containers + Firecracker NodePool.
+#
+# This pod proves the sandboxed runtime works end to end: it requests the
+# `kata-fc` RuntimeClass, so it runs inside a Firecracker microVM on a node from
+# the kata-fc Karpenter NodePool (terraform/karpenter.tf + terraform/manifests/).
+#
+# Scheduling note: we do NOT set a nodeSelector or tolerations here. The
+# `kata-fc` RuntimeClass already carries them in its `scheduling:` block
+# (nodeSelector workload=sandboxed + the matching NoSchedule toleration), and
+# Kubernetes injects them into any pod that sets `runtimeClassName: kata-fc`.
+#
+# It runs `sleep infinity` (busybox) rather than a pure pause container so you
+# can exec in and observe the isolation.
+#
+# Verify:
+#   kubectl get pod -l app=kata-fc-sample -o wide        # lands on a c8i/m8i/r8i node
+#   kubectl exec deploy/kata-fc-sample -- uname -r        # microVM kernel != host kernel
+#   kubectl get runtimeclass kata-fc
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kata-fc-sample
+  labels:
+    app: kata-fc-sample
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kata-fc-sample
+  template:
+    metadata:
+      labels:
+        app: kata-fc-sample
+    spec:
+      runtimeClassName: kata-fc
+      containers:
+        - name: sleep
+          image: public.ecr.aws/docker/library/busybox:latest
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"

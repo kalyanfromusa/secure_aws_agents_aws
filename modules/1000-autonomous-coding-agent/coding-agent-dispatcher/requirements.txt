@@ -1,0 +1,4 @@
+fastapi
+uvicorn[standard]
+httpx
+k8s-agent-sandbox

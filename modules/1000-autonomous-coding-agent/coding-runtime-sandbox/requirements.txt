@@ -1,0 +1,16 @@
+# Minimal deps for the agent-sandbox SDK-contract server (main.py). Unlike the
+# module-900 python runtime, the coding sandbox does NOT need the pandas/
+# scikit-learn data-science stack — the actual code work is done by the Claude
+# Code CLI (installed in the Dockerfile), not by this server.
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+
+# Pre-baked so the agent can BUILD AND TEST the seed app offline. The sandbox
+# egress is locked to DNS + model gateway + Gitea (no PyPI), so `pip install`
+# inside the microVM cannot reach an index — anything the seed app's tests need
+# must be present in the image. These cover the FastAPI seed repo: pytest as the
+# runner and httpx for fastapi.testclient.TestClient.
+pytest
+httpx

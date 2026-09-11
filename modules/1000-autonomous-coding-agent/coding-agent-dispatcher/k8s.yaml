@@ -1,0 +1,104 @@
+# Coding-agent dispatcher (module 1000). SA "coding-agent" (ns default) creates
+# SandboxClaims in ns agent-sandbox (Role/RoleBinding below). Bot creds + webhook
+# secret come from the coding-agent-creds Secret (written by gitea-provision.tf).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: coding-agent
+  namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coding-agent-dispatcher
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coding-agent
+  template:
+    metadata:
+      labels:
+        app: coding-agent
+    spec:
+      serviceAccountName: coding-agent
+      containers:
+        - name: coding-agent-dispatcher
+          image: ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/coding-agent-dispatcher:v4
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef: { name: coding-agent-creds, key: webhook-secret }
+            - name: BOT_USERNAME
+              valueFrom:
+                secretKeyRef: { name: coding-agent-creds, key: bot-username }
+            - name: BOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: coding-agent-creds, key: bot-password }
+            - name: TRIGGER_LABEL
+              valueFrom:
+                secretKeyRef: { name: coding-agent-creds, key: trigger-label }
+            - name: GITEA_API_URL
+              value: http://gitea-http.gitea.svc.cluster.local:3000/api/v1
+            # Model path + in-cluster endpoints injected into the coding sandbox.
+            # Explicit here (not code defaults) so the gateway route / model
+            # aliases can be changed without rebuilding the dispatcher image.
+            - name: GITEA_INTERNAL_URL
+              value: http://gitea-http.gitea.svc.cluster.local:3000
+            - name: MODEL_BASE_URL
+              value: http://ai-gateway.envoy-gateway-system.svc.cluster.local/anthropic
+            - name: MODEL_MAIN
+              value: claude-sonnet
+            - name: MODEL_SMALL
+              value: claude-haiku
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          resources:
+            requests: { cpu: "256m", memory: "256Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coding-agent-dispatcher
+  namespace: default
+spec:
+  selector:
+    app: coding-agent
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# Dispatcher RBAC: create/delete claims + watch sandboxes, in the sandbox namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: coding-agent-sandbox
+  namespace: agent-sandbox
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: coding-agent-sandbox
+  namespace: agent-sandbox
+subjects:
+  - kind: ServiceAccount
+    name: coding-agent
+    namespace: default
+roleRef:
+  kind: Role
+  name: coding-agent-sandbox
+  apiGroup: rbac.authorization.k8s.io
